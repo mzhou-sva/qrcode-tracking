@@ -13,16 +13,12 @@ const VIDEO_CONSTRAINTS = {
   audio: false,
 };
 
-// Approximate size of a QR code in the captured frame, in pixels.
-const QR_SIZE = 150;
-// jsQR only ever returns one decoded symbol per call, so to find multiple
-// codes in a frame we scan overlapping crop windows across the image and
-// decode each one separately. The window is bigger than a code (with room
-// for its quiet zone) and the step is small enough that the overlap between
-// adjacent windows is at least one code-width, so no code can fall entirely
-// across a window boundary and get missed.
-const TILE_SIZE = QR_SIZE * 2;
-const TILE_STEP = QR_SIZE;
+// A top-down sheet of printed codes is larger in the frame than the old
+// fixed 300px window, so a code can straddle every tile. Scan a few window
+// sizes. jsQR returns one symbol per call, so blank each hit and scan that
+// window again before moving on.
+const WINDOW_SIZES = [320, 480, 640];
+const MAX_CODES_PER_WINDOW = 4;
 
 navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS)
   .then((stream) => {
@@ -49,26 +45,29 @@ function tick() {
     sampleCtx.drawImage(video, 0, 0, sampleCanvas.width, sampleCanvas.height);
 
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
-    for (const qrCode of scanForQRCodes()) {
+    const codes = scanForQRCodes();
+    for (const qrCode of codes) {
       drawBox(qrCode.location);
       drawLabel(qrCode.location, qrCode.data);
     }
+    drawCount(codes.length);
   }
 
   requestAnimationFrame(tick);
 }
 
 function scanForQRCodes() {
-  const xs = getTilePositions(sampleCanvas.width);
-  const ys = getTilePositions(sampleCanvas.height);
+  const { width, height } = sampleCanvas;
+  const frame = sampleCtx.getImageData(0, 0, width, height);
   const detections = [];
 
-  for (const y of ys) {
-    for (const x of xs) {
-      const tile = sampleCtx.getImageData(x, y, TILE_SIZE, TILE_SIZE);
-      const qrCode = jsQR(tile.data, TILE_SIZE, TILE_SIZE);
-      if (qrCode) {
-        detections.push(offsetQRCode(qrCode, x, y));
+  for (const tile of WINDOW_SIZES) {
+    const step = Math.round(tile * 0.45);
+    const tileW = Math.min(tile, width);
+    const tileH = Math.min(tile, height);
+    for (const y of getTilePositions(height, tileH, step)) {
+      for (const x of getTilePositions(width, tileW, step)) {
+        scanWindow(frame.data, width, x, y, tileW, tileH, detections);
       }
     }
   }
@@ -76,20 +75,34 @@ function scanForQRCodes() {
   return dedupeDetections(detections);
 }
 
-// Start offsets for tiles of TILE_SIZE covering `dimension`, stepping by
-// TILE_STEP and with a final tile flush against the far edge so the whole
-// frame is covered even when it doesn't divide evenly by the step.
-function getTilePositions(dimension) {
-  if (dimension <= TILE_SIZE) {
+function scanWindow(frame, frameWidth, originX, originY, tileW, tileH, detections) {
+  const tile = new Uint8ClampedArray(tileW * tileH * 4);
+  for (let row = 0; row < tileH; row++) {
+    const src = ((originY + row) * frameWidth + originX) * 4;
+    tile.set(frame.subarray(src, src + tileW * 4), row * tileW * 4);
+  }
+
+  for (let n = 0; n < MAX_CODES_PER_WINDOW; n++) {
+    const qrCode = jsQR(tile, tileW, tileH, { inversionAttempts: 'dontInvert' });
+    if (!qrCode) {
+      break;
+    }
+    detections.push(offsetQRCode(qrCode, originX, originY));
+    blankSymbol(tile, tileW, tileH, qrCode.location);
+  }
+}
+
+function getTilePositions(dimension, tile, step) {
+  if (dimension <= tile) {
     return [0];
   }
 
   const positions = [];
-  for (let pos = 0; pos + TILE_SIZE <= dimension; pos += TILE_STEP) {
+  for (let pos = 0; pos + tile <= dimension; pos += step) {
     positions.push(pos);
   }
 
-  const lastPosition = dimension - TILE_SIZE;
+  const lastPosition = dimension - tile;
   if (positions[positions.length - 1] !== lastPosition) {
     positions.push(lastPosition);
   }
@@ -112,8 +125,6 @@ function offsetQRCode(qrCode, offsetX, offsetY) {
   };
 }
 
-// The same QR code is often found in more than one overlapping tile, so
-// collapse detections whose bounding boxes are centered near each other.
 function dedupeDetections(detections) {
   const unique = [];
 
@@ -123,7 +134,7 @@ function dedupeDetections(detections) {
       const existingCenter = centerOf(existing.location);
       const dx = center.x - existingCenter.x;
       const dy = center.y - existingCenter.y;
-      return Math.sqrt(dx * dx + dy * dy) < QR_SIZE;
+      return Math.sqrt(dx * dx + dy * dy) < 80;
     });
 
     if (!isDuplicate) {
@@ -140,6 +151,53 @@ function centerOf(location) {
     x: (topLeftCorner.x + bottomRightCorner.x) / 2,
     y: (topLeftCorner.y + bottomRightCorner.y) / 2,
   };
+}
+
+function blankSymbol(data, width, height, location) {
+  const corners = [
+    location.topLeftCorner,
+    location.topRightCorner,
+    location.bottomRightCorner,
+    location.bottomLeftCorner,
+  ];
+  let minX = width;
+  let minY = height;
+  let maxX = 0;
+  let maxY = 0;
+  for (const corner of corners) {
+    minX = Math.min(minX, corner.x);
+    minY = Math.min(minY, corner.y);
+    maxX = Math.max(maxX, corner.x);
+    maxY = Math.max(maxY, corner.y);
+  }
+
+  const pad = 8;
+  const x0 = Math.max(0, Math.floor(minX) - pad);
+  const y0 = Math.max(0, Math.floor(minY) - pad);
+  const x1 = Math.min(width - 1, Math.ceil(maxX) + pad);
+  const y1 = Math.min(height - 1, Math.ceil(maxY) + pad);
+
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const offset = (y * width + x) * 4;
+      data[offset] = 255;
+      data[offset + 1] = 255;
+      data[offset + 2] = 255;
+    }
+  }
+}
+
+function drawCount(count) {
+  const pad = Math.max(12, overlay.width * 0.012);
+  const fontSize = Math.max(18, overlay.width * 0.022);
+  overlayCtx.font = `bold ${fontSize}px monospace`;
+  overlayCtx.textBaseline = 'top';
+  const line = `QR codes: ${count}`;
+  const w = overlayCtx.measureText(line).width;
+  overlayCtx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+  overlayCtx.fillRect(pad, pad, w + pad * 2, fontSize + pad * 1.4);
+  overlayCtx.fillStyle = '#00ff00';
+  overlayCtx.fillText(line, pad * 1.5, pad * 1.1);
 }
 
 function drawBox(location) {
