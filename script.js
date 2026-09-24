@@ -13,12 +13,12 @@ const VIDEO_CONSTRAINTS = {
   audio: false,
 };
 
-// A top-down sheet of printed codes is larger in the frame than the old
-// fixed 300px window, so a code can straddle every tile. Scan a few window
-// sizes. jsQR returns one symbol per call, so blank each hit and scan that
-// window again before moving on.
-const WINDOW_SIZES = [320, 480, 640];
+// jsQR misses a code when the window is the wrong size or the code sits on
+// the edge. The codes on one sheet are the same size, so find any one,
+// measure it, and cut the rest of the frame to match.
+const COARSE_WINDOWS = [160, 240, 340, 460];
 const MAX_CODES_PER_WINDOW = 4;
+let fittedWindow = null;
 
 navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS)
   .then((stream) => {
@@ -32,9 +32,11 @@ video.addEventListener('loadedmetadata', () => {
   overlay.width = video.videoWidth;
   overlay.height = video.videoHeight;
 
+  // Scan a smaller copy. The boxes are scaled back up to the video.
+  const scanScale = Math.min(1, 960 / video.videoWidth);
   sampleCanvas = document.createElement('canvas');
-  sampleCanvas.width = video.videoWidth;
-  sampleCanvas.height = video.videoHeight;
+  sampleCanvas.width = Math.round(video.videoWidth * scanScale);
+  sampleCanvas.height = Math.round(video.videoHeight * scanScale);
   sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
 
   requestAnimationFrame(tick);
@@ -59,37 +61,99 @@ function tick() {
 function scanForQRCodes() {
   const { width, height } = sampleCanvas;
   const frame = sampleCtx.getImageData(0, 0, width, height);
-  const detections = [];
 
-  for (const tile of WINDOW_SIZES) {
-    const step = Math.round(tile * 0.45);
+  if (!fittedWindow) {
+    fittedWindow = findFittedWindow(frame.data, width, height);
+  }
+  if (!fittedWindow) {
+    return [];
+  }
+
+  const detections = [];
+  scanTiles(frame.data, width, height, fittedWindow.tile, fittedWindow.step, detections);
+  const unique = dedupeDetections(detections, fittedWindow.code * 0.6);
+
+  if (unique.length === 0) {
+    fittedWindow = null;
+  }
+
+  const scaleX = overlay.width / width;
+  const scaleY = overlay.height / height;
+  return unique.map((detection) => scaleDetection(detection, scaleX, scaleY));
+}
+
+// Look with a few window sizes until one code shows up, then copy its size.
+function findFittedWindow(frame, width, height) {
+  for (const tile of COARSE_WINDOWS) {
+    const step = Math.round(tile * 0.5);
     const tileW = Math.min(tile, width);
     const tileH = Math.min(tile, height);
     for (const y of getTilePositions(height, tileH, step)) {
       for (const x of getTilePositions(width, tileW, step)) {
-        scanWindow(frame.data, width, x, y, tileW, tileH, detections);
+        const hit = readWindow(frame, width, x, y, tileW, tileH)[0];
+        if (hit) {
+          const code = codeSize(hit.location);
+          return {
+            code,
+            tile: Math.round(Math.min(width, height, code * 1.5)),
+            step: Math.max(12, Math.round(code * 0.4)),
+          };
+        }
       }
     }
   }
 
-  return dedupeDetections(detections);
+  return null;
 }
 
-function scanWindow(frame, frameWidth, originX, originY, tileW, tileH, detections) {
+function scanTiles(frame, width, height, tile, step, detections) {
+  const tileW = Math.min(tile, width);
+  const tileH = Math.min(tile, height);
+  for (const y of getTilePositions(height, tileH, step)) {
+    for (const x of getTilePositions(width, tileW, step)) {
+      detections.push(...readWindow(frame, width, x, y, tileW, tileH));
+    }
+  }
+}
+
+function readWindow(frame, frameWidth, originX, originY, tileW, tileH) {
   const tile = new Uint8ClampedArray(tileW * tileH * 4);
   for (let row = 0; row < tileH; row++) {
     const src = ((originY + row) * frameWidth + originX) * 4;
     tile.set(frame.subarray(src, src + tileW * 4), row * tileW * 4);
   }
 
+  const found = [];
   for (let n = 0; n < MAX_CODES_PER_WINDOW; n++) {
     const qrCode = jsQR(tile, tileW, tileH, { inversionAttempts: 'dontInvert' });
     if (!qrCode) {
       break;
     }
-    detections.push(offsetQRCode(qrCode, originX, originY));
+    found.push(offsetQRCode(qrCode, originX, originY));
     blankSymbol(tile, tileW, tileH, qrCode.location);
   }
+  return found;
+}
+
+function codeSize(location) {
+  const { topLeftCorner, topRightCorner } = location;
+  const dx = topLeftCorner.x - topRightCorner.x;
+  const dy = topLeftCorner.y - topRightCorner.y;
+  return Math.hypot(dx, dy);
+}
+
+function scaleDetection(detection, scaleX, scaleY) {
+  const scale = (point) => ({ x: point.x * scaleX, y: point.y * scaleY });
+  const { topLeftCorner, topRightCorner, bottomRightCorner, bottomLeftCorner } = detection.location;
+  return {
+    data: detection.data,
+    location: {
+      topLeftCorner: scale(topLeftCorner),
+      topRightCorner: scale(topRightCorner),
+      bottomRightCorner: scale(bottomRightCorner),
+      bottomLeftCorner: scale(bottomLeftCorner),
+    },
+  };
 }
 
 function getTilePositions(dimension, tile, step) {
@@ -125,7 +189,7 @@ function offsetQRCode(qrCode, offsetX, offsetY) {
   };
 }
 
-function dedupeDetections(detections) {
+function dedupeDetections(detections, minDistance) {
   const unique = [];
 
   for (const detection of detections) {
@@ -134,7 +198,7 @@ function dedupeDetections(detections) {
       const existingCenter = centerOf(existing.location);
       const dx = center.x - existingCenter.x;
       const dy = center.y - existingCenter.y;
-      return Math.sqrt(dx * dx + dy * dy) < 80;
+      return Math.sqrt(dx * dx + dy * dy) < minDistance;
     });
 
     if (!isDuplicate) {
