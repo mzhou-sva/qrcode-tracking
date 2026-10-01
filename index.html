@@ -2,21 +2,52 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>QR tracking — desktop top-down</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>desktop top-down</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <canvas id="bg"></canvas>
   <video id="webcam" autoplay playsinline muted></video>
   <canvas id="overlay"></canvas>
-  <select id="camera" hidden></select>
-  <button id="start">Tap to start</button>
-  <div id="controls">
-    <div class="group"><span>By object</span><div id="by-object"></div></div>
-    <div class="group"><span>By sound</span><div id="by-sound"></div></div>
-    <p id="info"></p>
+
+  <div id="hud">
+    <div class="whisper">
+      <p>S N A C K &nbsp;·&nbsp; B E A T &nbsp;·&nbsp; M A C H I N E</p>
+      <p>Put a snack on the table to start playing.</p>
+    </div>
+    <div class="bar" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+    <ul class="snacks">
+      <li class="snack" data-name="water" data-phase="stopped"><i class="dot"></i><b>Water</b><em>Stopped</em></li>
+      <li class="snack" data-name="candy" data-phase="stopped"><i class="dot"></i><b>Candy</b><em>Stopped</em></li>
+      <li class="snack" data-name="cookie" data-phase="stopped"><i class="dot"></i><b>Cookie</b><em>Stopped</em></li>
+    </ul>
   </div>
+
+  <div id="controls" class="controls">
+    <div class="row">
+      <span class="row-label">By object</span>
+      <button type="button" data-by="object" data-item="water" aria-pressed="false">Water</button>
+      <button type="button" data-by="object" data-item="candy" aria-pressed="false">Candy</button>
+      <button type="button" data-by="object" data-item="cookie" aria-pressed="false">Cookie</button>
+    </div>
+    <div class="row">
+      <span class="row-label">By sound</span>
+      <button type="button" data-by="sound" data-item="water" aria-pressed="false">Gulp</button>
+      <button type="button" data-by="sound" data-item="candy" aria-pressed="false">Crackle</button>
+      <button type="button" data-by="sound" data-item="cookie" aria-pressed="false">Crunch</button>
+    </div>
+    <p class="info" role="status" aria-live="polite"></p>
+  </div>
+
+  <div id="start">
+    <button id="startButton" type="button">[ Tap to start ]</button>
+    <p id="startMessage"></p>
+  </div>
+
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="audio.js"></script>
+  <script src="background.js"></script>
   <script src="snacks.js"></script>
   <script src="script.js"></script>
 </body>
