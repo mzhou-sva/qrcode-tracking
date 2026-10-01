@@ -9,7 +9,15 @@
 <body>
   <video id="webcam" autoplay playsinline muted></video>
   <canvas id="overlay"></canvas>
+  <select id="camera" hidden></select>
+  <button id="start">Tap to start</button>
+  <div id="controls">
+    <div class="group"><span>By object</span><div id="by-object"></div></div>
+    <div class="group"><span>By sound</span><div id="by-sound"></div></div>
+    <p id="info"></p>
+  </div>
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
+  <script src="snacks.js"></script>
   <script src="script.js"></script>
 </body>
 </html>

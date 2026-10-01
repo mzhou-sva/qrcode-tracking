@@ -7,11 +7,19 @@ let sampleCtx;
 
 const VIDEO_CONSTRAINTS = {
   video: {
-    width: { ideal: 1920 },
-    height: { ideal: 1080 },
+    width: { ideal: 2560 },
+    height: { ideal: 1440 },
+    frameRate: { ideal: 30 },
   },
   audio: false,
 };
+
+const PREFERRED_CAMERA = /ugreen/i;
+const CAMERA_STORAGE_KEY = 'camera-device-id';
+const SCAN_WIDTH = 960;
+const cameraSelect = document.getElementById('camera');
+let currentStream = null;
+let ticking = false;
 
 // jsQR misses a code when the window is the wrong size or the code sits on
 // the edge. The codes on one sheet are the same size, so find any one,
@@ -20,26 +28,129 @@ const COARSE_WINDOWS = [160, 240, 340, 460];
 const MAX_CODES_PER_WINDOW = 4;
 let fittedWindow = null;
 
-navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS)
-  .then((stream) => {
-    video.srcObject = stream;
-  })
-  .catch((error) => {
-    console.error('Unable to access webcam:', error);
-  });
+function savedCamera() {
+  try {
+    return localStorage.getItem(CAMERA_STORAGE_KEY);
+  } catch (error) {
+    return null;
+  }
+}
+
+function saveCamera(deviceId) {
+  try {
+    localStorage.setItem(CAMERA_STORAGE_KEY, deviceId);
+  } catch (error) {
+    console.warn('Unable to remember camera:', error);
+  }
+}
+
+async function openCamera(deviceId) {
+  const video = { ...VIDEO_CONSTRAINTS.video };
+  if (deviceId) {
+    video.deviceId = { exact: deviceId };
+  }
+  try {
+    return await navigator.mediaDevices.getUserMedia({ ...VIDEO_CONSTRAINTS, video });
+  } catch (error) {
+    if (!deviceId) {
+      throw error;
+    }
+    return navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS);
+  }
+}
+
+async function tuneTrack(track) {
+  const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+  const advanced = {};
+  for (const key of ['focusMode', 'exposureMode', 'whiteBalanceMode']) {
+    if (capabilities[key] && capabilities[key].includes('continuous')) {
+      advanced[key] = 'continuous';
+    }
+  }
+  if (Object.keys(advanced).length > 0) {
+    await track.applyConstraints({ advanced: [advanced] }).catch((error) => {
+      console.warn('Unable to tune camera:', error);
+    });
+  }
+}
+
+async function startCamera(deviceId) {
+  if (currentStream) {
+    currentStream.getTracks().forEach((track) => track.stop());
+  }
+
+  currentStream = await openCamera(deviceId);
+  video.srcObject = currentStream;
+
+  const track = currentStream.getVideoTracks()[0];
+  await tuneTrack(track);
+  const { width, height, frameRate, deviceId: activeId } = track.getSettings();
+  console.log(`Camera "${track.label}": ${width}x${height} @ ${frameRate}fps`);
+  return activeId;
+}
+
+async function listCameras(activeId) {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  const cameras = devices.filter((device) => device.kind === 'videoinput');
+
+  cameraSelect.replaceChildren(...cameras.map((camera, index) => {
+    const option = document.createElement('option');
+    option.value = camera.deviceId;
+    option.textContent = camera.label || `Camera ${index + 1}`;
+    return option;
+  }));
+  cameraSelect.value = activeId;
+  cameraSelect.hidden = cameras.length < 2;
+  return cameras;
+}
+
+async function setupCamera() {
+  const remembered = savedCamera();
+  const activeId = await startCamera(remembered);
+  const cameras = await listCameras(activeId);
+
+  if (!remembered) {
+    const preferred = cameras.find((camera) => PREFERRED_CAMERA.test(camera.label));
+    if (preferred && preferred.deviceId !== activeId) {
+      await listCameras(await startCamera(preferred.deviceId));
+    }
+  }
+}
+
+cameraSelect.addEventListener('change', async () => {
+  saveCamera(cameraSelect.value);
+  try {
+    await startCamera(cameraSelect.value);
+  } catch (error) {
+    console.error('Unable to switch camera:', error);
+  }
+});
+
+navigator.mediaDevices.addEventListener('devicechange', () => {
+  const track = currentStream && currentStream.getVideoTracks()[0];
+  listCameras(track && track.getSettings().deviceId);
+});
+
+setupCamera().catch((error) => {
+  console.error('Unable to access webcam:', error);
+});
 
 video.addEventListener('loadedmetadata', () => {
   overlay.width = video.videoWidth;
   overlay.height = video.videoHeight;
+  fittedWindow = null;
 
   // Scan a smaller copy. The boxes are scaled back up to the video.
-  const scanScale = Math.min(1, 960 / video.videoWidth);
+  const scanScale = Math.min(1, SCAN_WIDTH / video.videoWidth);
   sampleCanvas = document.createElement('canvas');
   sampleCanvas.width = Math.round(video.videoWidth * scanScale);
   sampleCanvas.height = Math.round(video.videoHeight * scanScale);
   sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
 
-  requestAnimationFrame(tick);
+  if (!ticking) {
+    ticking = true;
+    requestAnimationFrame(tick);
+  }
 });
 
 function tick() {
@@ -50,7 +161,11 @@ function tick() {
     const codes = scanForQRCodes();
     for (const qrCode of codes) {
       drawBox(qrCode.location);
-      drawLabel(qrCode.location, qrCode.data);
+    }
+    updateSnacks(codes);
+    drawSnacks(overlayCtx);
+    for (const qrCode of codes) {
+      drawLabel(qrCode.location, snackLabel(qrCode.data), snackLabelGap(qrCode.data, codeSize(qrCode.location)));
     }
     drawCount(codes.length);
   }
@@ -278,13 +393,16 @@ function drawBox(location) {
   overlayCtx.stroke();
 }
 
-function drawLabel(location, text) {
+function drawLabel(location, text, gap = 0) {
   const { bottomLeftCorner, bottomRightCorner } = location;
 
   const fontSize = Math.max(16, overlay.width * 0.02);
   const padding = fontSize * 0.25;
   const x = Math.min(bottomLeftCorner.x, bottomRightCorner.x);
-  const y = Math.max(bottomLeftCorner.y, bottomRightCorner.y) + padding;
+  const y = Math.min(
+    Math.max(bottomLeftCorner.y, bottomRightCorner.y) + padding + gap,
+    overlay.height - fontSize - padding * 2
+  );
 
   overlayCtx.font = `${fontSize}px monospace`;
   overlayCtx.textBaseline = 'top';
