@@ -11,11 +11,24 @@ let codeSide = null;
 
 const VIDEO_CONSTRAINTS = {
   video: {
-    width: { ideal: 1920 },
-    height: { ideal: 1080 },
+    width: { ideal: 2560 },
+    height: { ideal: 1440 },
+    frameRate: { ideal: 30 },
   },
   audio: false,
 };
+const RESOLUTION_STEPS = [
+  [VIDEO_CONSTRAINTS.video.width.ideal, VIDEO_CONSTRAINTS.video.height.ideal],
+  [1920, 1080],
+  [1280, 720],
+  [640, 480],
+];
+const FATAL_CAMERA_ERRORS = ['NotAllowedError', 'SecurityError', 'NotFoundError'];
+const CAMERA_STORAGE_KEY = 'snack-camera';
+let cameraStream = null;
+let cameraList = [];
+let deviceListenerAttached = false;
+let ticking = false;
 
 // The frame is shrunk to this width before scanning; boxes are drawn back
 // onto the original-size overlay by dividing coordinates by `scale`.
@@ -35,15 +48,15 @@ const MAX_DECODES_PER_WINDOW = 12;
 
 const LABEL_FONT = '"Helvetica Neue","Noto Sans CJK SC",Arial,sans-serif';
 
-// Snack rhythm machine (audio.js, snacks.js, background.js).
-const background = createBackground(document.getElementById('bg'));
-background.start();
+// Snack rhythm machine (audio.js, snacks.js).
 let audio = null;
 let machine = null;
 
 const startScreen = document.getElementById('start');
 const startButton = document.getElementById('startButton');
 const startMessage = document.getElementById('startMessage');
+const cameraRow = document.getElementById('cameraRow');
+const cameraSelect = document.getElementById('cameraSelect');
 
 startButton.addEventListener('click', async () => {
   startButton.disabled = true;
@@ -80,14 +93,160 @@ startButton.addEventListener('click', async () => {
   startScreen.classList.add('hidden');
 });
 
-// The camera and the audio are only started from the "Tap to start" handler.
-function startCamera() {
-  return navigator.mediaDevices.getUserMedia(VIDEO_CONSTRAINTS).then((stream) => {
-    video.srcObject = stream;
+function videoConstraints(width, height, deviceId) {
+  const base = { width: { ideal: width }, height: { ideal: height }, frameRate: VIDEO_CONSTRAINTS.video.frameRate };
+  return deviceId ? { ...base, deviceId: { exact: deviceId } } : base;
+}
+
+async function requestStream(deviceId) {
+  for (const [width, height] of RESOLUTION_STEPS) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ video: videoConstraints(width, height, deviceId), audio: false });
+    } catch (error) {
+      if (FATAL_CAMERA_ERRORS.includes(error.name)) throw error;
+    }
+  }
+  return navigator.mediaDevices.getUserMedia({ video: deviceId ? { deviceId: { exact: deviceId } } : true, audio: false });
+}
+
+async function tuneCamera(track) {
+  try {
+    const capabilities = track.getCapabilities ? track.getCapabilities() : {};
+    const wanted = {};
+    for (const key of ['focusMode', 'exposureMode', 'whiteBalanceMode']) {
+      if (Array.isArray(capabilities[key]) && capabilities[key].includes('continuous')) wanted[key] = 'continuous';
+    }
+    if (Object.keys(wanted).length) await track.applyConstraints({ advanced: [wanted] });
+  } catch (error) {
+    return;
+  }
+}
+
+function announceCamera(track) {
+  const settings = track.getSettings ? track.getSettings() : {};
+  const fps = settings.frameRate ? `${Math.round(settings.frameRate)}fps` : 'unknown fps';
+  console.log(`Camera "${track.label}": ${settings.width || '?'}x${settings.height || '?'} @ ${fps}`);
+}
+
+async function openCamera(deviceId) {
+  if (cameraStream) cameraStream.getTracks().forEach((track) => track.stop());
+  cameraStream = null;
+  codeSide = null;
+  const stream = await requestStream(deviceId);
+  cameraStream = stream;
+  video.srcObject = stream;
+  const track = stream.getVideoTracks()[0];
+  await tuneCamera(track);
+  announceCamera(track);
+}
+
+function currentDeviceId() {
+  const track = cameraStream && cameraStream.getVideoTracks()[0];
+  const settings = track && track.getSettings ? track.getSettings() : {};
+  return settings.deviceId || null;
+}
+
+function readStoredCamera() {
+  try {
+    const raw = localStorage.getItem(CAMERA_STORAGE_KEY);
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' ? parsed : { id: raw, label: '' };
+    } catch (error) {
+      return { id: raw, label: '' };
+    }
+  } catch (error) {
+    return null;
+  }
+}
+
+function rememberCamera(device) {
+  try {
+    localStorage.setItem(CAMERA_STORAGE_KEY, JSON.stringify({ id: device.deviceId, label: device.label }));
+  } catch (error) {
+    return;
+  }
+}
+
+function pickCamera(list, stored) {
+  const remembered = stored
+    ? list.find((device) => device.deviceId === stored.id) || (stored.label ? list.find((device) => device.label === stored.label) : null)
+    : null;
+  return remembered || list.find((device) => /ugreen/i.test(device.label)) || null;
+}
+
+function renderCameraList() {
+  cameraSelect.innerHTML = '';
+  cameraList.forEach((device, index) => {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label || `Camera ${index + 1}`;
+    cameraSelect.appendChild(option);
   });
+  const active = currentDeviceId();
+  if (active) cameraSelect.value = active;
+  cameraRow.hidden = cameraList.length < 2;
+}
+
+async function refreshCameras() {
+  const devices = await navigator.mediaDevices.enumerateDevices();
+  cameraList = devices.filter((device) => device.kind === 'videoinput');
+  renderCameraList();
+}
+
+async function switchCamera(deviceId) {
+  try {
+    await openCamera(deviceId);
+  } catch (error) {
+    console.error('Unable to open that camera, using the default one:', error);
+    await openCamera(null);
+  }
+  renderCameraList();
+}
+
+async function onDevicesChanged() {
+  try {
+    await refreshCameras();
+    const active = currentDeviceId();
+    if (cameraStream && active && !cameraList.some((device) => device.deviceId === active)) {
+      const chosen = pickCamera(cameraList, readStoredCamera());
+      await switchCamera(chosen ? chosen.deviceId : null);
+    }
+  } catch (error) {
+    console.error('Unable to refresh the camera list:', error);
+  }
+}
+
+cameraSelect.addEventListener('change', async () => {
+  const deviceId = cameraSelect.value;
+  const chosen = cameraList.find((device) => device.deviceId === deviceId);
+  if (chosen) rememberCamera(chosen);
+  try {
+    await switchCamera(deviceId);
+  } catch (error) {
+    console.error('Unable to switch camera:', error);
+  }
+});
+
+// The camera and the audio are only started from the "Tap to start" handler.
+async function startCamera() {
+  await openCamera(null);
+  try {
+    await refreshCameras();
+    const chosen = pickCamera(cameraList, readStoredCamera());
+    if (chosen && chosen.deviceId !== currentDeviceId()) await switchCamera(chosen.deviceId);
+  } catch (error) {
+    console.error('Unable to list cameras:', error);
+  }
+  if (!deviceListenerAttached) {
+    deviceListenerAttached = true;
+    navigator.mediaDevices.addEventListener('devicechange', onDevicesChanged);
+  }
 }
 
 video.addEventListener('loadedmetadata', () => {
+  codeSide = null;
   overlay.width = video.videoWidth;
   overlay.height = video.videoHeight;
 
@@ -97,7 +256,10 @@ video.addEventListener('loadedmetadata', () => {
   sampleCanvas.height = Math.round(video.videoHeight * scale);
   sampleCtx = sampleCanvas.getContext('2d', { willReadFrequently: true });
 
-  requestAnimationFrame(tick);
+  if (!ticking) {
+    ticking = true;
+    requestAnimationFrame(tick);
+  }
 });
 
 function tick() {
@@ -105,19 +267,22 @@ function tick() {
     sampleCtx.drawImage(video, 0, 0, sampleCanvas.width, sampleCanvas.height);
 
     overlayCtx.clearRect(0, 0, overlay.width, overlay.height);
+    if (machine) {
+      machine.drawGrid(overlayCtx);
+    }
     const qrCodes = scanForQRCodes();
     if (machine) {
-      machine.update(qrCodes);
-      background.setEnergy(machine.draw(overlayCtx));
+      machine.update(qrCodes, { width: overlay.width, height: overlay.height });
+      machine.draw(overlayCtx);
     }
     for (const qrCode of qrCodes) {
       const snack = machine && machine.describe(qrCode.data);
       drawBox(qrCode.location, snack ? snack.color : undefined);
-      if (snack) {
-        drawLabel(qrCode.location, snack.text, snack.color);
-      }
     }
     drawCount(qrCodes.length);
+    if (machine) {
+      machine.drawLabels(overlayCtx);
+    }
   }
 
   requestAnimationFrame(tick);

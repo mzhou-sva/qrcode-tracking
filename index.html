@@ -7,8 +7,8 @@
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
-  <canvas id="bg"></canvas>
   <video id="webcam" autoplay playsinline muted></video>
+  <div id="zone" class="zone" hidden></div>
   <canvas id="overlay"></canvas>
 
   <div id="hud">
@@ -25,6 +25,12 @@
   </div>
 
   <div id="controls" class="controls">
+    <button type="button" id="controlsToggle" class="controls-toggle" aria-expanded="true" aria-controls="controlsBody">Controls</button>
+    <div id="controlsBody" class="controls-body">
+    <div class="row camera-row" id="cameraRow" hidden>
+      <span class="row-label">Camera</span>
+      <select id="cameraSelect" aria-label="Camera"></select>
+    </div>
     <div class="row">
       <span class="row-label">By object</span>
       <button type="button" data-by="object" data-item="water" aria-pressed="false">Water</button>
@@ -37,7 +43,31 @@
       <button type="button" data-by="sound" data-item="candy" aria-pressed="false">Crackle</button>
       <button type="button" data-by="sound" data-item="cookie" aria-pressed="false">Crunch</button>
     </div>
+    <div class="row where-row">
+      <span class="row-label">Where</span>
+      <div class="where-grid">
+        <button type="button" data-row="0" data-col="0" aria-pressed="false"></button>
+        <button type="button" data-row="0" data-col="1" aria-pressed="false"></button>
+        <button type="button" data-row="0" data-col="2" aria-pressed="false"></button>
+        <button type="button" data-row="1" data-col="0" aria-pressed="false"></button>
+        <button type="button" data-row="1" data-col="1" aria-pressed="false"></button>
+        <button type="button" data-row="1" data-col="2" aria-pressed="false"></button>
+        <button type="button" data-row="2" data-col="0" aria-pressed="false"></button>
+        <button type="button" data-row="2" data-col="1" aria-pressed="false"></button>
+        <button type="button" data-row="2" data-col="2" aria-pressed="false"></button>
+      </div>
+    </div>
+    <div class="row describe-row">
+      <span class="row-label">Describe</span>
+      <input type="text" class="describe" placeholder="e.g. top left, right side, middle" aria-label="Describe a position" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="80">
+    </div>
+    <div class="row">
+      <span class="row-label">Measure from</span>
+      <button type="button" data-ref="corner" aria-pressed="true">Top-left corner</button>
+      <button type="button" data-ref="center" aria-pressed="false">Center</button>
+    </div>
     <p class="info" role="status" aria-live="polite"></p>
+    </div>
   </div>
 
   <div id="start">
@@ -47,7 +77,6 @@
 
   <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
   <script src="audio.js"></script>
-  <script src="background.js"></script>
   <script src="snacks.js"></script>
   <script src="script.js"></script>
 </body>
